@@ -14,52 +14,42 @@ class Connection(object):
 
 
 connection = click.make_pass_decorator(Connection, ensure=True)
-home = os.environ["HOME"]
 
 
 @click.group()
 @connection
 def cli(connection):
+    """"Entry Point for miqsel commandline"""
+
     try:
         connection.client = docker.from_env()
     except Exception:
         click.echo("Fail to connect docker")
         exit(1)
-    conf = Configuration()
-    connection.conf = conf.read()
-    proj_dir = connection.conf.get("project_dir")
 
-    if proj_dir == "":
-        if not os.path.isdir("conf"):
-            click.echo(
-                "Please run command from project directory or set project directory with config"
-            )
-            exit(0)
+    # Initial check for project path else set it.
+    conf = Configuration()
+    data = Configuration().read()
+
+    if data["container"]["project_dir"] == "":
+        click.echo("set project path like > /home/user_name/../../integration_tests")
+        data["container"]["project_dir"] = click.prompt("Project path")
+        conf.write(data)
+    connection.conf = data
 
 
 class Configuration(object):
     """Configure miqsel"""
 
-    def __init__(self):
-        self.conf_file = "{home}/.config/miqsel/conf.yml".format(home=home)
-        dir_path = os.path.dirname(self.conf_file)
-
-        if not os.path.isdir(dir_path):
-            os.makedirs(dir_path)
-
-        if not os.path.isfile(self.conf_file):
-            raw_cfg = {
-                "project_dir": "",
-                "container_name": "miq_sel",
-                "image": "cfmeqe/cfme_sel_stable:latest",
-                "vnc_port": 5999,
-                "server_port": 4444,
-            }
-            self.write(raw_cfg)
+    def __init__(self, conf_file="conf.yaml"):
+        self.conf_file = conf_file
 
     def read(self):
-        with open(self.conf_file, "r") as ymlfile:
-            return yaml.load(ymlfile)
+        try:
+            with open(self.conf_file, "r") as ymlfile:
+                return yaml.load(ymlfile)
+        except IOError:
+            return {}
 
     def write(self, cfg):
         with open(self.conf_file, "w") as ymlfile:
@@ -67,73 +57,55 @@ class Configuration(object):
 
 
 def set_env(hostname=None, browser=None):
-    conf = Configuration().read()
-    proj_dir = conf.get("project_dir")
-    port = conf.get("server_port")
+    """"Modify env.local.yaml file of integration test project"""
+    data = Configuration().read()
+    server_data = data["container"]
+    env_data = data["env"]
+    port = server_data.get("server_port")
+    path = os.path.join(server_data.get("project_dir"), "conf/env.local.yaml")
 
-    if proj_dir != "":
-        path = os.path.join(proj_dir, "conf/env.local.yaml")
-    else:
-        path = "conf/env.local.yaml"
+    env = Configuration(path)
+    local_env = env.read()
+    env_data = local_env if local_env else env_data
 
-    raw_cfg = {
-        "browser": {
-            "webdriver": "Remote",
-            "webdriver_options": {
-                "keep_alive": True,
-                "desired_capabilities": {
-                    "browserName": "chrome",
-                    "platform": "LINUX",
-                    "unexpectedAlertBehaviour": "ignore",
-                    "acceptInsecureCerts": True,
-                    "acceptSslCerts": True,
-                }
-            },
-        }
-    }
-
-    try:
-        with open(path, "r") as ymlfile:
-            env_yaml = yaml.safe_load(ymlfile)
-    except IOError:
-        env_yaml = {}
-
-    env_yaml = env_yaml if env_yaml else raw_cfg
     if hostname:
         url = "http://{host}:{port}/wd/hub".format(host=hostname, port=port)
-        env_yaml["browser"]["webdriver_options"]["command_executor"] = url
+        env_data["browser"]["webdriver_options"]["command_executor"] = url
+
     if browser:
-        env_yaml["browser"]["webdriver_options"]["desired_capabilities"]["browserName"] = browser
-    with open(path, "w") as ymlfile:
-        yaml.safe_dump(env_yaml, ymlfile, default_flow_style=False)
+        env_data["browser"]["webdriver_options"]["desired_capabilities"]["browserName"] = browser
+    env.write(env_data)
 
 
 @cli.command(help="Configure Miq Selenium webdriver")
 def config():
+    """Configure selenium attributes"""
     conf = Configuration()
-    cfg = conf.read()
-
+    data = conf.read()
+    cfg = data["container"]
     cfg["project_dir"] = click.prompt("Miq project working dir", default=cfg.get("project_dir"))
-    cfg["container_name"] = click.prompt("Container name", default=cfg.get("container_name"))
+    cfg["container_name"] = click.prompt("Container name", default=cfg.get("name"))
     cfg["image"] = click.prompt("Docker selenium driver image", default=cfg.get("image"))
     cfg["vnc_port"] = click.prompt("VNC running on port?", default=cfg.get("vnc_port"))
     cfg["server_port"] = click.prompt(
         "Selenium server running on port?", default=cfg["server_port"]
     )
-    conf.write(cfg=cfg)
+    conf.write(cfg=data)
     click.echo("Configuration saved successfully...")
 
 
 @connection
 def get_container(connection):
+    """get container object"""
     try:
-        return connection.client.containers.get(connection.conf.get("container_name"))
+        return connection.client.containers.get(connection.conf["container"]["name"])
     except docker.errors.NotFound:
         return None
 
 
 @cli.command(help="Miq Selenium Server Hostname")
 def hostname():
+    """Get miq selenium container hostname"""
     container = get_container()
     host = container.attrs["NetworkSettings"]["IPAddress"] if container else None
     click.echo(host)
@@ -143,6 +115,7 @@ def hostname():
 @cli.command(help="VNC viewer")
 @click.option("-u", "--url", default=None, help="Server url with port <hostname:port>")
 def viewer(url):
+    """Trigger tiger vnc"""
     os.system("vncviewer {url}&".format(url=url))
 
 
@@ -150,9 +123,11 @@ def viewer(url):
 @connection
 @click.pass_context
 def start(ctx, connection):
+    """Pull image and start miq selenium container with yaml modification"""
     container = get_container()
-    img = connection.conf.get("image")
-    name = connection.conf.get("container_name")
+    img = connection.conf["container"]["image"]
+    name = connection.conf["container"]["name"]
+    vnc_port = connection.conf["container"]["vnc_port"]
 
     if not container:
         connection.client.containers.run(img, name=name, detach=True, auto_remove=True)
@@ -163,9 +138,7 @@ def start(ctx, connection):
         while True:
             host = ctx.invoke(hostname)
             if host:
-                url = "{hostname}:{port}".format(
-                    hostname=host, port=connection.conf.get("vnc_port")
-                )
+                url = "{hostname}:{port}".format(hostname=host, port=vnc_port)
                 break
             elif time.time() > (t0 + 20):
                 click.echo("Timeout: Fail to get hostname. Check for selenium server status")
@@ -183,6 +156,7 @@ def start(ctx, connection):
 
 @cli.command(help="Stop Miq Selenium Server")
 def stop():
+    """stop miq selenium server"""
     container = get_container()
 
     if getattr(container, "status", None) == "running":
@@ -193,6 +167,7 @@ def stop():
 
 @cli.command(help="Status of Miq Selenium Server")
 def status():
+    """check status of miq selenium container"""
     container = get_container()
     if container:
         click.echo(container.status)
@@ -204,4 +179,5 @@ def status():
 @click.option("-c", "--chrome", "browser", flag_value="chrome", default=True, help="Chrome")
 @click.option("-f", "--firefox", "browser", flag_value="firefox", help="Firefox")
 def browser(browser):
+    """choose browser"""
     set_env(browser=browser)

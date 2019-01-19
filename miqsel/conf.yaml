@@ -1,0 +1,18 @@
+container:
+  container_name: selenium_container
+  image: cfmeqe/cfme_sel_stable:latest
+  name: selenium_container
+  project_dir: /home/ndhandre/cfme/integration_tests
+  server_port: 4444
+  vnc_port: 5999
+env:
+  browser:
+    webdriver: Remote
+    webdriver_options:
+      desired_capabilities:
+        acceptInsecureCerts: true
+        acceptSslCerts: true
+        browserName: chrome
+        platform: LINUX
+        unexpectedAlertBehaviour: ignore
+      keep_alive: true
